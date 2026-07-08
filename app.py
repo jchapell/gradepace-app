@@ -16,7 +16,7 @@ from github_store import GitHubStore
 # Persistent cache lives in a private GitHub repo via github_store.py.
 # =========================================================================
 
-st.set_page_config(page_title="GradePace Strategy Engine", page_icon="🏔️", layout="wide")
+st.set_page_config(page_title="GradePace Planner", page_icon="🏔️", layout="wide")
 
 REQUIRED_SECRETS = [
     "STRAVA_CLIENT_ID", "STRAVA_CLIENT_SECRET", "STRAVA_REFRESH_TOKEN",
@@ -163,7 +163,7 @@ altitude_rate = st.sidebar.slider("Altitude drag (%/1000ft)", 0.0, 5.0, 2.0, 0.1
 planned_stops_min = st.sidebar.number_input("Planned stops (minutes)", 0, 600, 0, 5,
                                             help="Aid stations, summits, photos. Added to the adjusted "
                                                  "projection to give Projected Elapsed Time.")
-allow_benefit = st.sidebar.checkbox("Below-baseline speedup", value=False,
+allow_benefit = st.sidebar.checkbox("Below Baseline Elev. Speedup", value=False,
                                     help="If checked, courses below your training altitude run faster.")
 
 with st.sidebar.expander("Import existing cache (one-time migration)"):
@@ -186,7 +186,7 @@ with st.sidebar.expander("Import existing cache (one-time migration)"):
 # =========================================================================
 # MAIN
 # =========================================================================
-st.title("🏔️ GradePace Strategy Engine")
+st.title("🏔️ GradePace Planner")
 
 window_df, n_runs = gp.select_range(streams, meta, start_date, end_date, activity_types) \
     if len(meta) else (pd.DataFrame(columns=gp.STREAM_COLS), 0)
@@ -198,14 +198,27 @@ if n_runs == 0:
 
 profile, baseline_ft = gp.build_profile(window_df)
 
-with st.expander(f"🏔️ Pacing profile — {n_runs} runs | baseline {baseline_ft:,.0f} ft", expanded=False):
+with st.expander(f"🏔️ Pacing profile — {n_runs} runs | baseline {baseline_ft:,.0f} ft", expanded=True):
+    pfig = go.Figure()
+    grade_labels = [b.split("(")[1].rstrip(")") for b in profile["grade_band"]]
+    pfig.add_bar(
+        x=grade_labels, y=profile["pace_median"], marker_color="#5B8FF9",
+        customdata=np.stack([profile["grade_band"],
+                             [gp.f_pace(v) for v in profile["pace_median"]],
+                             profile["n_samples"]], axis=-1),
+        hovertemplate="%{customdata[0]}<br>Median: %{customdata[1]} /mi"
+                      "<br>Samples: %{customdata[2]:,}<extra></extra>")
+    pfig.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10),
+                       yaxis=dict(title="Median pace (min/mi)"),
+                       xaxis=dict(title="Grade"))
+    st.plotly_chart(pfig, use_container_width=True)
     disp = profile.copy()
     disp["Pace F / M / S"] = disp.apply(
         lambda r: f"{gp.f_pace(r.pace_fast)} / {gp.f_pace(r.pace_median)} / {gp.f_pace(r.pace_slow)}", axis=1)
     disp["HR F / M / S"] = disp.apply(
         lambda r: (f"{r.hr_fast:.0f} / {r.hr_median:.0f} / {r.hr_slow:.0f}"
                    if pd.notna(r.hr_median) else "N/A"), axis=1)
-    st.caption("F/M/S = your faster-quartile / typical / slower-quartile pace in each "
+    st.caption("F = your faster-quartile / M = typical / S = slower-quartile pace in each "
                "grade band, from all pace samples across these runs.")
     st.dataframe(disp[["grade_band", "Pace F / M / S", "HR F / M / S", "n_samples"]],
                  use_container_width=True, hide_index=True)
@@ -316,7 +329,7 @@ st.dataframe(pd.DataFrame(mile_rows), use_container_width=True, hide_index=True,
              height=min(38 * (len(mile_rows) + 1), 600))
 
 # --- pace bars + cumulative time lines ---
-miles, tgt_pace, act_pace, cum_tgt, cum_act = [], [], [], [], []
+miles, tgt_pace, act_pace, stop_pmi, stop_fmt, cum_tgt, cum_act = [], [], [], [], [], [], []
 run_tgt, run_act = 0.0, 0.0
 for m, g in df.groupby("mile_bucket"):
     mi = g["delta_dist_miles"].sum()
@@ -330,17 +343,25 @@ for m, g in df.groupby("mile_bucket"):
         act = g["actual_delta"].sum()
         stop = g["stopped_sec"].sum()
         act_pace.append(((act - stop) / 60.0) / mi)
+        stop_pmi.append((stop / 60.0) / mi)
+        stop_fmt.append(gp.f_time(stop))
         run_act += act
         cum_act.append(run_act)
 
 fig = go.Figure()
 fig.add_bar(x=miles, y=tgt_pace, name="Target pace (M)", marker_color="#5B8FF9",
+            offsetgroup=0,
             customdata=[gp.f_pace(v) for v in tgt_pace],
             hovertemplate="Mile %{x}<br>Target: %{customdata} /mi<extra></extra>")
 if has_watch:
     fig.add_bar(x=miles, y=act_pace, name="Actual moving pace", marker_color="#F6903D",
+                offsetgroup=1,
                 customdata=[gp.f_pace(v) for v in act_pace],
-                hovertemplate="Mile %{x}<br>Actual: %{customdata} /mi<extra></extra>")
+                hovertemplate="Mile %{x}<br>Moving: %{customdata} /mi<extra></extra>")
+    fig.add_bar(x=miles, y=stop_pmi, base=act_pace, name="Stopped time",
+                marker_color="#1a1a1a", offsetgroup=1,
+                customdata=stop_fmt,
+                hovertemplate="Mile %{x}<br>Stopped: %{customdata}<extra></extra>")
 fig.add_scatter(x=miles, y=[s / 3600.0 for s in cum_tgt], yaxis="y2", mode="lines",
                 name="Cumulative target", line=dict(color="#1A56B0", width=3),
                 customdata=[gp.f_time(s) for s in cum_tgt],
