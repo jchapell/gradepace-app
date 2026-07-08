@@ -156,7 +156,12 @@ if st.sidebar.button("🔄 Sync Strava (incremental)", type="primary",
 
 st.sidebar.header("2 · Model dials")
 fatigue_rate = st.sidebar.slider("Fatigue rate (%/mile)", 0.0, 3.0, 1.0, 0.1)
+fatigue_onset = st.sidebar.number_input("Fatigue onset (mile)", 0.0, 200.0, 1.0, 0.5,
+                                        help="Fatigue decay starts accumulating after this mile.")
 altitude_rate = st.sidebar.slider("Altitude drag (%/1000ft)", 0.0, 5.0, 2.0, 0.1)
+planned_stops_min = st.sidebar.number_input("Planned stops (minutes)", 0, 600, 0, 5,
+                                            help="Aid stations, summits, photos. Added to the adjusted "
+                                                 "projection to give Projected Elapsed Time.")
 allow_benefit = st.sidebar.checkbox("Below-baseline speedup", value=False,
                                     help="If checked, courses below your training altitude run faster.")
 
@@ -201,7 +206,8 @@ with st.expander(f"🏔️ Pacing profile — {n_runs} runs | baseline {baseline
                    if pd.notna(r.hr_median) else "N/A"), axis=1)
     st.dataframe(disp[["grade_band", "Pace F / M / S", "HR F / M / S", "n_samples"]],
                  use_container_width=True, hide_index=True)
-    st.caption("Gears: F=25th pct (strong day) | M=median | S=75th pct (rough day)")
+    st.caption("F/M/S = your faster-quartile / typical / slower-quartile pace in each "
+               "grade band, from all pace samples across these runs.")
 
 st.header("Course engine")
 st.caption("Course GPX → pacing plan. Watch GPX (with timestamps) → plan + variance + calibration.")
@@ -212,7 +218,7 @@ if gpx_file is None:
 gpx_df = gp.parse_gpx(gpx_file)
 df = gp.simulate(gpx_df, profile, baseline_ft,
                  fatigue_rate=fatigue_rate, altitude_rate=altitude_rate,
-                 allow_altitude_benefit=allow_benefit)
+                 allow_altitude_benefit=allow_benefit, fatigue_onset_mile=fatigue_onset)
 has_watch = bool(df["has_telemetry"].iloc[0])
 total_mi = df["delta_dist_miles"].sum()
 gain = df[df["delta_ele"] > 0]["delta_ele"].sum() * gp.M_TO_FT
@@ -221,7 +227,8 @@ loss = abs(df[df["delta_ele"] < 0]["delta_ele"].sum() * gp.M_TO_FT)
 mode = "📊 Post-run analysis (telemetry detected)" if has_watch else "🔮 Prediction (no telemetry)"
 st.subheader(mode)
 st.caption(f"{gpx_file.name} | {total_mi:.2f} mi | +{gain:,.0f}/-{loss:,.0f} ft ({gain - loss:+,.0f}) | "
-           f"fatigue {fatigue_rate}%/mi | altitude {altitude_rate}%/1000ft above {baseline_ft:,.0f} ft")
+           f"fatigue {fatigue_rate}%/mi after mile {fatigue_onset:g} | "
+           f"altitude {altitude_rate}%/1000ft above {baseline_ft:,.0f} ft")
 
 # --- raw vs adjusted projections (+ actuals) ---
 r1 = st.columns(4)
@@ -237,14 +244,25 @@ r2[2].metric("Median", gp.f_time(df["pred_sec_median"].sum()),
              delta=gp.f_signed(df["pred_sec_median"].sum() - df["raw_sec_median"].sum()), delta_color="inverse")
 r2[3].metric("Slow", gp.f_time(df["pred_sec_slow"].sum()),
              delta=gp.f_signed(df["pred_sec_slow"].sum() - df["raw_sec_slow"].sum()), delta_color="inverse")
+if planned_stops_min > 0:
+    stops_sec = planned_stops_min * 60.0
+    r3 = st.columns(4)
+    r3[0].markdown(f"**Projected elapsed** *(+ {planned_stops_min} min stops)*")
+    r3[1].metric("Fast", gp.f_time(df["pred_sec_fast"].sum() + stops_sec))
+    r3[2].metric("Median", gp.f_time(df["pred_sec_median"].sum() + stops_sec))
+    r3[3].metric("Slow", gp.f_time(df["pred_sec_slow"].sum() + stops_sec))
+
+# 5. Actuals in a visually distinct bordered block
 if has_watch:
     total_actual = df["actual_delta"].sum()
     stopped = df["stopped_sec"].sum()
-    a = st.columns(4)
-    a[0].metric("⌚ Watch total", gp.f_time(total_actual))
-    a[1].metric("Moving", gp.f_time(total_actual - stopped))
-    a[2].metric("Stopped", gp.f_time(stopped))
-    a[3].metric("vs Adjusted Median", gp.f_signed(total_actual - df["pred_sec_median"].sum()))
+    with st.container(border=True):
+        st.markdown("**:orange[⌚ Actuals — from your watch]**")
+        a = st.columns(4)
+        a[0].metric("Watch total", gp.f_time(total_actual))
+        a[1].metric("Moving", gp.f_time(total_actual - stopped))
+        a[2].metric("Stopped", gp.f_time(stopped))
+        a[3].metric("vs Adjusted Median", gp.f_signed(total_actual - df["pred_sec_median"].sum()))
 
 # --- band time budget ---
 st.markdown("**⏱️ Time by grade band (adjusted)**")
@@ -257,8 +275,7 @@ for band, g in df.groupby("grade_band"):
         "Median": gp.f_time(g["pred_sec_median"].sum()),
         "Slow": gp.f_time(g["pred_sec_slow"].sum()),
         "Actual*": gp.f_time(g["actual_delta"].sum()) if has_watch else "N/A",
-        "Dist": f"{mi:.2f} mi",
-        "Share": f"{mi / total_mi * 100:.0f}%",
+        "Share": f"{mi / total_mi * 100:.0f}% · {mi:.2f} mi",
     })
 st.dataframe(pd.DataFrame(band_rows), use_container_width=True, hide_index=True)
 if has_watch:
