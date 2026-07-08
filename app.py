@@ -3,6 +3,7 @@ import time
 
 import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
 import requests
 import streamlit as st
 
@@ -204,10 +205,10 @@ with st.expander(f"🏔️ Pacing profile — {n_runs} runs | baseline {baseline
     disp["HR F / M / S"] = disp.apply(
         lambda r: (f"{r.hr_fast:.0f} / {r.hr_median:.0f} / {r.hr_slow:.0f}"
                    if pd.notna(r.hr_median) else "N/A"), axis=1)
-    st.dataframe(disp[["grade_band", "Pace F / M / S", "HR F / M / S", "n_samples"]],
-                 use_container_width=True, hide_index=True)
     st.caption("F/M/S = your faster-quartile / typical / slower-quartile pace in each "
                "grade band, from all pace samples across these runs.")
+    st.dataframe(disp[["grade_band", "Pace F / M / S", "HR F / M / S", "n_samples"]],
+                 use_container_width=True, hide_index=True)
 
 st.header("Course engine")
 st.caption("Course GPX → pacing plan. Watch GPX (with timestamps) → plan + variance + calibration.")
@@ -232,12 +233,12 @@ st.caption(f"{gpx_file.name} | {total_mi:.2f} mi | +{gain:,.0f}/-{loss:,.0f} ft 
 
 # --- raw vs adjusted projections (+ actuals) ---
 r1 = st.columns(4)
-r1[0].markdown("**Raw projection**")
+r1[0].markdown("**Raw Projected Moving Time**")
 r1[1].metric("Fast", gp.f_time(df["raw_sec_fast"].sum()))
 r1[2].metric("Median", gp.f_time(df["raw_sec_median"].sum()))
 r1[3].metric("Slow", gp.f_time(df["raw_sec_slow"].sum()))
 r2 = st.columns(4)
-r2[0].markdown("**Adjusted** *(+fatigue & altitude)*")
+r2[0].markdown("**Adjusted Projected Moving Time** *(+fatigue & altitude)*")
 r2[1].metric("Fast", gp.f_time(df["pred_sec_fast"].sum()),
              delta=gp.f_signed(df["pred_sec_fast"].sum() - df["raw_sec_fast"].sum()), delta_color="inverse")
 r2[2].metric("Median", gp.f_time(df["pred_sec_median"].sum()),
@@ -314,10 +315,51 @@ for m, g in df.groupby("mile_bucket"):
 st.dataframe(pd.DataFrame(mile_rows), use_container_width=True, hide_index=True,
              height=min(38 * (len(mile_rows) + 1), 600))
 
-# --- pace chart ---
-chart = df.groupby("mile_bucket")[["base_pace_median", "sim_pace_median"]].mean()
-chart.columns = ["Raw pace (median)", "Adjusted pace (median)"]
-st.line_chart(chart)
+# --- pace bars + cumulative time lines ---
+miles, tgt_pace, act_pace, cum_tgt, cum_act = [], [], [], [], []
+run_tgt, run_act = 0.0, 0.0
+for m, g in df.groupby("mile_bucket"):
+    mi = g["delta_dist_miles"].sum()
+    if mi < 0.1:
+        continue
+    miles.append(int(m))
+    tgt_pace.append(g["sim_pace_median"].mean())
+    run_tgt += g["pred_sec_median"].sum()
+    cum_tgt.append(run_tgt)
+    if has_watch:
+        act = g["actual_delta"].sum()
+        stop = g["stopped_sec"].sum()
+        act_pace.append(((act - stop) / 60.0) / mi)
+        run_act += act
+        cum_act.append(run_act)
+
+fig = go.Figure()
+fig.add_bar(x=miles, y=tgt_pace, name="Target pace (M)", marker_color="#5B8FF9",
+            customdata=[gp.f_pace(v) for v in tgt_pace],
+            hovertemplate="Mile %{x}<br>Target: %{customdata} /mi<extra></extra>")
+if has_watch:
+    fig.add_bar(x=miles, y=act_pace, name="Actual moving pace", marker_color="#F6903D",
+                customdata=[gp.f_pace(v) for v in act_pace],
+                hovertemplate="Mile %{x}<br>Actual: %{customdata} /mi<extra></extra>")
+fig.add_scatter(x=miles, y=[s / 3600.0 for s in cum_tgt], yaxis="y2", mode="lines",
+                name="Cumulative target", line=dict(color="#1A56B0", width=3),
+                customdata=[gp.f_time(s) for s in cum_tgt],
+                hovertemplate="Mile %{x}<br>Cum target: %{customdata}<extra></extra>")
+if has_watch:
+    fig.add_scatter(x=miles, y=[s / 3600.0 for s in cum_act], yaxis="y2", mode="lines",
+                    name="Cumulative actual (elapsed)", line=dict(color="#C2570C", width=3, dash="dot"),
+                    customdata=[gp.f_time(s) for s in cum_act],
+                    hovertemplate="Mile %{x}<br>Cum elapsed: %{customdata}<extra></extra>")
+fig.update_layout(
+    barmode="group", height=430,
+    margin=dict(l=10, r=10, t=30, b=10),
+    legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+    xaxis=dict(title="Mile", dtick=1 if len(miles) <= 35 else 5),
+    yaxis=dict(title="Pace (min/mi)"),
+    yaxis2=dict(title="Cumulative time (hr)", overlaying="y", side="right", showgrid=False),
+    hovermode="x unified",
+)
+st.plotly_chart(fig, use_container_width=True)
 
 # --- calibration insights ---
 if has_watch:
