@@ -74,9 +74,20 @@ def sync_strava(start_date, end_date, activity_types):
         r = rate_limited_get("https://www.strava.com/api/v3/athlete/activities",
                              headers, {"per_page": 100, "page": page,
                                        "after": after, "before": before}, status).json()
+        # Strava returns a list on success; a dict {"message","errors"} on failure.
+        if isinstance(r, dict):
+            msg = r.get("message", "Unknown error")
+            errs = r.get("errors", [])
+            status.update(label="Strava returned an error", state="error")
+            detail = f" ({errs})" if errs else ""
+            st.error(f"Strava API error while listing activities: **{msg}**{detail}\n\n"
+                     "If this says 'Authorization Error', your refresh token likely lacks the "
+                     "activity:read_all scope — re-mint it with that scope and update the "
+                     "STRAVA_REFRESH_TOKEN secret. If it mentions rate limits, wait 15 minutes.")
+            return
         if not r:
             break
-        acts += [a for a in r if a.get("type") in activity_types]
+        acts += [a for a in r if isinstance(a, dict) and a.get("type") in activity_types]
         page += 1
         time.sleep(0.2)
 
