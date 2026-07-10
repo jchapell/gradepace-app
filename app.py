@@ -189,7 +189,7 @@ meta = st.session_state["meta"]
 # =========================================================================
 # SIDEBAR
 # =========================================================================
-APP_BUILD = "2026-07-10-b (persistent errors)"
+APP_BUILD = "2026-07-10-d (adjusted-target labels)"
 st.sidebar.markdown(f"**Athlete:** {st.session_state['athlete_name']}")
 st.sidebar.caption(f"Build: {APP_BUILD}")
 st.sidebar.caption(f"Cache: {meta.shape[0]} activities / {len(streams):,} points")
@@ -408,21 +408,31 @@ st.dataframe(pd.DataFrame(band_rows), use_container_width=True, hide_index=True)
 if has_watch:
     st.caption("*Actual includes stopped time within each band.")
 
-    b_lbl, b_tgt, b_act = [], [], []
+    st.markdown("**Pace by grade band** — the table above shows *total time* per band; "
+                "these bars show the same data as *pace per mile*. Targets are your profile "
+                "paces plus this course's fatigue & altitude adjustments, so they sit a bit "
+                "above the profile chart's medians.")
+    b_lbl, b_tgt, b_act, b_hover_t, b_hover_a = [], [], [], [], []
     for band, g in df.groupby("grade_band"):
         mi = g["delta_dist_miles"].sum()
         if mi < 0.05:
             continue
+        tgt_sec = g["pred_sec_median"].sum()
+        act_mov = g["actual_delta"].sum() - g["stopped_sec"].sum()
         b_lbl.append(band.split("(")[1].rstrip(")"))
-        b_tgt.append((g["pred_sec_median"].sum() / 60.0) / mi)
-        b_act.append(((g["actual_delta"].sum() - g["stopped_sec"].sum()) / 60.0) / mi)
+        b_tgt.append((tgt_sec / 60.0) / mi)
+        b_act.append((act_mov / 60.0) / mi)
+        b_hover_t.append(f"{gp.f_pace((tgt_sec / 60.0) / mi)} /mi "
+                         f"({gp.f_time(tgt_sec)} over {mi:.2f} mi)")
+        b_hover_a.append(f"{gp.f_pace((act_mov / 60.0) / mi)} /mi "
+                         f"({gp.f_time(act_mov)} moving over {mi:.2f} mi)")
     bfig = go.Figure()
-    bfig.add_bar(x=b_lbl, y=b_tgt, name="Target pace (M)", marker_color="#5B8FF9",
-                 customdata=[gp.f_pace(v) for v in b_tgt],
-                 hovertemplate="%{x}<br>Target: %{customdata} /mi<extra></extra>")
+    bfig.add_bar(x=b_lbl, y=b_tgt, name="Adjusted target (M)", marker_color="#5B8FF9",
+                 customdata=b_hover_t,
+                 hovertemplate="%{x}<br>Adjusted target: %{customdata}<extra></extra>")
     bfig.add_bar(x=b_lbl, y=b_act, name="Actual moving pace", marker_color="#F6903D",
-                 customdata=[gp.f_pace(v) for v in b_act],
-                 hovertemplate="%{x}<br>Actual: %{customdata} /mi<extra></extra>")
+                 customdata=b_hover_a,
+                 hovertemplate="%{x}<br>Actual: %{customdata}<extra></extra>")
     bfig.update_layout(barmode="group", height=300,
                        margin=dict(l=10, r=10, t=30, b=10),
                        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
@@ -495,9 +505,9 @@ fig = go.Figure()
 _ele_min, _ele_max = float(df["ele_ft"].min()), float(df["ele_ft"].max())
 _span = max(_ele_max - _ele_min, 1.0)
 fig.add_scatter(x=df["cum_dist_miles"], y=df["ele_ft"], yaxis="y3", mode="lines",
-                line=dict(width=0), fill="tozeroy", fillcolor="rgba(150,150,150,0.18)",
+                line=dict(width=0), fill="tozeroy", fillcolor="rgba(140,140,140,0.35)",
                 hoverinfo="skip", showlegend=False, name="Elevation")
-fig.add_bar(x=miles, y=tgt_pace, name="Target pace (M)", marker_color="#5B8FF9",
+fig.add_bar(x=miles, y=tgt_pace, name="Adjusted target (M)", marker_color="#5B8FF9",
             offsetgroup=0,
             customdata=[gp.f_pace(v) for v in tgt_pace],
             hovertemplate="Mile %{x}<br>Target: %{customdata} /mi<extra></extra>")
