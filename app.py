@@ -79,11 +79,12 @@ def sync_strava(start_date, end_date, activity_types):
             msg = r.get("message", "Unknown error")
             errs = r.get("errors", [])
             status.update(label="Strava returned an error", state="error")
-            detail = f" ({errs})" if errs else ""
-            st.error(f"Strava API error while listing activities: **{msg}**{detail}\n\n"
-                     "If this says 'Authorization Error', your refresh token likely lacks the "
-                     "activity:read_all scope — re-mint it with that scope and update the "
-                     "STRAVA_REFRESH_TOKEN secret. If it mentions rate limits, wait 15 minutes.")
+            st.session_state["sync_report"] = {
+                "error": f"Strava API error while listing activities: {msg} "
+                         f"{errs if errs else ''}",
+                "window": f"{start_date} → {end_date}",
+                "selected_types": list(activity_types),
+            }
             return
         if not r:
             break
@@ -188,7 +189,7 @@ meta = st.session_state["meta"]
 # =========================================================================
 # SIDEBAR
 # =========================================================================
-APP_BUILD = "2026-07-10-a (diagnostics)"
+APP_BUILD = "2026-07-10-b (persistent errors)"
 st.sidebar.markdown(f"**Athlete:** {st.session_state['athlete_name']}")
 st.sidebar.caption(f"Build: {APP_BUILD}")
 st.sidebar.caption(f"Cache: {meta.shape[0]} activities / {len(streams):,} points")
@@ -202,7 +203,14 @@ activity_types = st.sidebar.multiselect("Activity types", ["Trail Run", "Run"],
                                         default=["Trail Run", "Run"])
 if st.sidebar.button("🔄 Sync Strava (incremental)", type="primary",
                      help="Fetches only runs the cache has never seen, then saves to GitHub."):
-    sync_strava(start_date, end_date, activity_types)
+    try:
+        sync_strava(start_date, end_date, activity_types)
+    except Exception as e:
+        st.session_state["sync_report"] = {
+            "error": f"Sync crashed: {type(e).__name__}: {e}",
+            "window": f"{start_date} → {end_date}",
+            "selected_types": list(activity_types),
+        }
     st.rerun()
 
 st.sidebar.header("2 · Model dials")
@@ -256,6 +264,14 @@ with st.expander("ℹ️ How to use GradePace"):
 
 if "sync_report" in st.session_state:
     rep = st.session_state["sync_report"]
+    if "error" in rep:
+        st.error(f"❌ Last sync failed ({rep['window']}, types {rep['selected_types']}):\n\n"
+                 f"**{rep['error']}**\n\n"
+                 "If this says *Authorization Error*: the refresh token in your secrets lacks "
+                 "the needed scope — re-mint it via the authorize link with "
+                 "scope=activity:read_all,profile:read_all and update STRAVA_REFRESH_TOKEN. "
+                 "If it mentions *Rate Limit*: wait 15 minutes and retry.")
+        st.stop()
     st.success(f"Last sync: {rep['new_added']} new, {rep['skipped_no_streams']} skipped, "
                f"{rep['types_relabeled']} re-labeled — {rep['listed_in_window']} activities "
                f"matched in {rep['window']} (cache: {rep['cache_total']})")
