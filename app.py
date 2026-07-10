@@ -148,6 +148,23 @@ def sync_strava(start_date, end_date, activity_types):
                         f"(cache: {meta.shape[0]} activities)",
                   state="complete", expanded=True)
 
+    # diagnostics report (survives the rerun; shown in the main area)
+    st.session_state["sync_report"] = {
+        "window": f"{start_date} → {end_date}",
+        "selected_types": list(activity_types),
+        "listed_in_window": len(acts),
+        "newest_listed": [
+            {"name": a.get("name", "?")[:38],
+             "sport_type": a.get("sport_type"), "type": a.get("type"),
+             "date": str(a.get("start_date", ""))[:10]}
+            for a in acts[-5:][::-1]
+        ],
+        "new_added": len(new_meta), "skipped_no_streams": skipped,
+        "types_relabeled": types_updated,
+        "cache_type_counts": meta["type"].value_counts().to_dict() if len(meta) else {},
+        "cache_total": int(meta.shape[0]),
+    }
+
 
 # =========================================================================
 # SESSION BOOTSTRAP (auth once, pull cache from GitHub once)
@@ -234,6 +251,18 @@ with st.expander("ℹ️ How to use GradePace"):
         "actuals, variance, and insights that help you calibrate the dials.\n\n"
         "*F/M/S gears: your faster-quartile, typical, and slower-quartile paces for each "
         "terrain grade, learned from your own history.*")
+
+if "sync_report" in st.session_state:
+    rep = st.session_state["sync_report"]
+    st.success(f"Last sync: {rep['new_added']} new, {rep['skipped_no_streams']} skipped, "
+               f"{rep['types_relabeled']} re-labeled — {rep['listed_in_window']} activities "
+               f"matched in {rep['window']} (cache: {rep['cache_total']})")
+    with st.expander("🔧 Sync diagnostics"):
+        st.markdown(f"**Selected types:** {rep['selected_types']}")
+        st.markdown("**Newest activities Strava returned for this window (matching filter):**")
+        st.dataframe(pd.DataFrame(rep["newest_listed"]), use_container_width=True, hide_index=True)
+        st.markdown("**Cache type labels (all cached activities):**")
+        st.json(rep["cache_type_counts"])
 
 window_df, n_runs = gp.select_range(streams, meta, start_date, end_date, activity_types) \
     if len(meta) else (pd.DataFrame(columns=gp.STREAM_COLS), 0)
