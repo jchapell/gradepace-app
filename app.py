@@ -91,9 +91,24 @@ def sync_strava(start_date, end_date, activity_types):
         page += 1
         time.sleep(0.2)
 
+    # Re-label already-cached activities with sport_type from this listing.
+    # (Legacy harvests stored the old 'type' field, where trail runs are just 'Run'.)
+    types_updated = 0
+    if len(meta):
+        type_map = {int(a["id"]): (a.get("sport_type") or a.get("type")) for a in acts}
+        ids64 = meta["activity_id"].astype("int64")
+        mask = ids64.isin(type_map.keys())
+        if mask.any():
+            new_types = ids64[mask].map(type_map)
+            types_updated = int((meta.loc[mask, "type"].values != new_types.values).sum())
+            meta = meta.copy()
+            meta.loc[mask, "type"] = new_types.values
+
     to_fetch = gp.missing_ids(acts, meta)
     status.update(label=f"{len(acts)} runs in window — {len(to_fetch)} new to fetch "
-                        f"({len(acts) - len(to_fetch)} already cached)", state="running")
+                        f"({len(acts) - len(to_fetch)} already cached"
+                        f"{f', {types_updated} re-labeled' if types_updated else ''})",
+                  state="running")
 
     new_streams, new_meta = [], []
     progress = st.progress(0.0) if to_fetch else None
@@ -123,11 +138,15 @@ def sync_strava(start_date, end_date, activity_types):
     streams, meta = gp.merge_new(streams, meta, new_streams, new_meta)
     st.session_state["streams"], st.session_state["meta"] = streams, meta
 
-    if new_meta:
+    skipped = len(to_fetch) - len(new_meta)
+    if new_meta or types_updated:
         status.update(label="Saving cache to GitHub...", state="running")
         store.save_athlete_cache(athlete_id, streams, meta)
-    status.update(label=f"Sync complete: {len(new_meta)} new runs added "
-                        f"(cache: {meta.shape[0]} activities)", state="complete", expanded=False)
+    status.update(label=f"Sync complete: {len(new_meta)} new runs added"
+                        f"{f', {skipped} skipped (no usable GPS streams)' if skipped else ''}"
+                        f"{f', {types_updated} re-labeled' if types_updated else ''} "
+                        f"(cache: {meta.shape[0]} activities)",
+                  state="complete", expanded=True)
 
 
 # =========================================================================
