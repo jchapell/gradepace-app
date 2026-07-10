@@ -87,7 +87,7 @@ def sync_strava(start_date, end_date, activity_types):
             return
         if not r:
             break
-        acts += [a for a in r if isinstance(a, dict) and a.get("type") in activity_types]
+        acts += [a for a in r if isinstance(a, dict) and gp.activity_matches(a, activity_types)]
         page += 1
         time.sleep(0.2)
 
@@ -114,7 +114,8 @@ def sync_strava(start_date, end_date, activity_types):
                                             distance_meters=dist[i], altitude_meters=alt[i],
                                             heart_rate_bpm=hr[i] if has_hr else np.nan))
                 new_meta.append(dict(activity_id=act["id"], name=act["name"],
-                                     type=act["type"], start_date=act["start_date"]))
+                                     type=act.get("sport_type") or act.get("type"),
+                                     start_date=act["start_date"]))
         progress.progress((idx + 1) / len(to_fetch),
                           text=f"{idx + 1}/{len(to_fetch)}: {act['name'][:40]}")
         time.sleep(0.15)
@@ -198,6 +199,22 @@ with st.sidebar.expander("Import existing cache (one-time migration)"):
 # MAIN
 # =========================================================================
 st.title("🏔️ GradePace Planner")
+st.caption("Your Strava history → a personal pace-by-grade profile → course predictions "
+           "with fatigue & altitude modeling.")
+with st.expander("ℹ️ How to use GradePace"):
+    st.markdown(
+        "1. **Sync Strava** (sidebar) — pulls your run history. Incremental: after the first "
+        "sync, it only fetches new runs, so it takes seconds.\n"
+        "2. **Set the data window** — your pacing profile is built from runs in this date "
+        "range. Changing it is free (no re-download).\n"
+        "3. **Tune the model dials** — fatigue rate/onset and altitude drag shape how "
+        "predictions adjust beyond your raw paces.\n"
+        "4. **Upload a course GPX** — get Fast / Median / Slow projections, a grade-band "
+        "time budget, and mile-by-mile targets.\n"
+        "5. **After the run**, upload the GPX from your watch — the same view fills in with "
+        "actuals, variance, and insights that help you calibrate the dials.\n\n"
+        "*F/M/S gears: your faster-quartile, typical, and slower-quartile paces for each "
+        "terrain grade, learned from your own history.*")
 
 window_df, n_runs = gp.select_range(streams, meta, start_date, end_date, activity_types) \
     if len(meta) else (pd.DataFrame(columns=gp.STREAM_COLS), 0)
@@ -209,18 +226,25 @@ if n_runs == 0:
 
 profile, baseline_ft = gp.build_profile(window_df)
 
-with st.expander(f"🏔️ Pacing profile — {n_runs} runs | baseline {baseline_ft:,.0f} ft", expanded=True):
+_fm = gp.filter_meta(meta, start_date, end_date, activity_types)
+last_run_str = _fm["start_date"].max().strftime("%-m/%-d/%Y") if len(_fm) else "—"
+
+with st.expander(f"🏔️ Pacing profile — {n_runs} runs | Last run {last_run_str} | "
+                 f"baseline {baseline_ft:,.0f} ft", expanded=True):
     pfig = go.Figure()
     grade_labels = [b.split("(")[1].rstrip(")") for b in profile["grade_band"]]
     pfig.add_bar(
         x=grade_labels, y=profile["pace_median"], marker_color="#5B8FF9",
+        text=[gp.f_pace(v) for v in profile["pace_median"]],
+        textposition="outside", cliponaxis=False,
         customdata=np.stack([profile["grade_band"],
                              [gp.f_pace(v) for v in profile["pace_median"]],
                              profile["n_samples"]], axis=-1),
         hovertemplate="%{customdata[0]}<br>Median: %{customdata[1]} /mi"
                       "<br>Samples: %{customdata[2]:,}<extra></extra>")
-    pfig.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10),
-                       yaxis=dict(title="Median pace (min/mi)"),
+    pfig.update_layout(height=310, margin=dict(l=10, r=10, t=25, b=10),
+                       yaxis=dict(title="Median pace (min/mi)",
+                                  range=[0, float(profile["pace_median"].max()) * 1.18]),
                        xaxis=dict(title="Grade"))
     st.plotly_chart(pfig, use_container_width=True)
     disp = profile.copy()
@@ -289,6 +313,18 @@ if has_watch:
         a[2].metric("Stopped", gp.f_time(stopped))
         a[3].metric("vs Adjusted Median", gp.f_signed(total_actual - df["pred_sec_median"].sum()))
 
+# --- historical stops for similar-length runs ---
+if st.session_state.get("hist_stops_key") != len(streams):
+    st.session_state["hist_stops"] = gp.historical_stops(streams)
+    st.session_state["hist_stops_key"] = len(streams)
+_hs = st.session_state["hist_stops"]
+if len(_hs):
+    _lo, _hi = total_mi - 2.5, total_mi + 2.5
+    _sim = _hs[(_hs["miles"] >= _lo) & (_hs["miles"] <= _hi)]
+    if len(_sim):
+        st.caption(f"⏸️ On your {len(_sim)} past runs of {_lo:.1f}–{_hi:.1f} mi, "
+                   f"you typically stopped {gp.f_time(_sim['stopped_sec'].median())}.")
+
 # --- band time budget ---
 st.markdown("**⏱️ Time by grade band (adjusted)**")
 band_rows = []
@@ -306,8 +342,33 @@ st.dataframe(pd.DataFrame(band_rows), use_container_width=True, hide_index=True)
 if has_watch:
     st.caption("*Actual includes stopped time within each band.")
 
+    b_lbl, b_tgt, b_act = [], [], []
+    for band, g in df.groupby("grade_band"):
+        mi = g["delta_dist_miles"].sum()
+        if mi < 0.05:
+            continue
+        b_lbl.append(band.split("(")[1].rstrip(")"))
+        b_tgt.append((g["pred_sec_median"].sum() / 60.0) / mi)
+        b_act.append(((g["actual_delta"].sum() - g["stopped_sec"].sum()) / 60.0) / mi)
+    bfig = go.Figure()
+    bfig.add_bar(x=b_lbl, y=b_tgt, name="Target pace (M)", marker_color="#5B8FF9",
+                 customdata=[gp.f_pace(v) for v in b_tgt],
+                 hovertemplate="%{x}<br>Target: %{customdata} /mi<extra></extra>")
+    bfig.add_bar(x=b_lbl, y=b_act, name="Actual moving pace", marker_color="#F6903D",
+                 customdata=[gp.f_pace(v) for v in b_act],
+                 hovertemplate="%{x}<br>Actual: %{customdata} /mi<extra></extra>")
+    bfig.update_layout(barmode="group", height=300,
+                       margin=dict(l=10, r=10, t=30, b=10),
+                       legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+                       xaxis=dict(title="Grade"), yaxis=dict(title="Pace (min/mi)"))
+    st.plotly_chart(bfig, use_container_width=True)
+
 # --- unified mile table ---
-st.markdown("**📊 Mile-by-mile** — targets are altitude+fatigue adjusted")
+st.markdown("**📊 Mile-by-mile** — targets are altitude+fatigue adjusted; "
+            "GAP = your moving pace translated to flat ground, using your own profile")
+_flat_band = "4. Flat / Undulating (-2% to 2%)"
+_prof_lut = profile.set_index("grade_band")["pace_median"]
+_flat_med = float(_prof_lut.get(_flat_band, profile["pace_median"].median()))
 mile_rows = []
 for m, g in df.groupby("mile_bucket"):
     mi = g["delta_dist_miles"].sum()
@@ -318,11 +379,15 @@ for m, g in df.groupby("mile_bucket"):
     if has_watch:
         act = g["actual_delta"].sum()
         stop = g["stopped_sec"].sum()
-        moving = gp.f_pace(((act - stop) / 60.0) / mi)
+        moving_num = ((act - stop) / 60.0) / mi
+        moving = gp.f_pace(moving_num)
+        base_avg = (g["base_pace_median"] * g["delta_dist_miles"]).sum() / mi
+        ratio = base_avg / _flat_med if _flat_med else 1.0
+        gap = gp.f_pace(moving_num / ratio) if ratio > 0 else "N/A"
         var = gp.f_signed((act - stop) - g["pred_sec_median"].sum())
         stop_s = gp.f_time(stop)
     else:
-        moving, var, stop_s = "N/A", "N/A", "N/A"
+        moving, gap, var, stop_s = "N/A", "N/A", "N/A", "N/A"
     mile_rows.append({
         "Mile": int(m),
         "Target (F/M/S)": f"{gp.f_pace(g['sim_pace_fast'].mean())} / "
@@ -332,6 +397,7 @@ for m, g in df.groupby("mile_bucket"):
         "Fatigue": gp.f_signed(g["fatigue_cost_median"].sum()),
         "Alt Cost": gp.f_signed(g["altitude_cost_median"].sum()),
         "Moving": moving,
+        "GAP": gap,
         "Var": var,
         "Stop": stop_s,
         "Vert": f"+{climb:.0f}/-{drop:.0f} ({climb - drop:+.0f})",
@@ -360,6 +426,11 @@ for m, g in df.groupby("mile_bucket"):
         cum_act.append(run_act)
 
 fig = go.Figure()
+_ele_min, _ele_max = float(df["ele_ft"].min()), float(df["ele_ft"].max())
+_span = max(_ele_max - _ele_min, 1.0)
+fig.add_scatter(x=df["cum_dist_miles"], y=df["ele_ft"], yaxis="y3", mode="lines",
+                line=dict(width=0), fill="tozeroy", fillcolor="rgba(150,150,150,0.18)",
+                hoverinfo="skip", showlegend=False, name="Elevation")
 fig.add_bar(x=miles, y=tgt_pace, name="Target pace (M)", marker_color="#5B8FF9",
             offsetgroup=0,
             customdata=[gp.f_pace(v) for v in tgt_pace],
@@ -389,12 +460,17 @@ fig.update_layout(
     xaxis=dict(title="Mile", dtick=1 if len(miles) <= 35 else 5),
     yaxis=dict(title="Pace (min/mi)"),
     yaxis2=dict(title="Cumulative time (hr)", overlaying="y", side="right", showgrid=False),
+    yaxis3=dict(overlaying="y", visible=False, showgrid=False,
+                range=[_ele_min - _span * 0.02, _ele_min + _span * 1.6]),
     hovermode="x unified",
 )
 st.plotly_chart(fig, use_container_width=True)
 
-# --- calibration insights ---
+# --- post-run insights ---
 if has_watch:
+    st.markdown("**📋 Run insights**")
+    for line in gp.run_insights(df):
+        st.markdown(f"- {line}")
     st.markdown("**🎯 Calibration insights**")
     for line in gp.calibration_insights(df, fatigue_rate, altitude_rate):
         st.markdown(f"- {line}")

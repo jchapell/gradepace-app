@@ -133,15 +133,34 @@ def merge_new(streams, meta, new_stream_rows, new_meta_rows):
     return streams, meta
 
 
-def select_range(streams, meta, start_date, end_date, activity_types):
+def _norm_type(t):
+    """Normalize activity types so 'Trail Run', 'TrailRun', 'trailrun' all match."""
+    return str(t).replace(" ", "").lower()
+
+
+def activity_matches(act, activity_types):
+    """True if a Strava activity dict matches any selected type.
+    Prefers sport_type (which distinguishes TrailRun) over legacy type."""
+    sel = {_norm_type(t) for t in activity_types}
+    val = act.get("sport_type") or act.get("type") or ""
+    return _norm_type(val) in sel
+
+
+def filter_meta(meta, start_date, end_date, activity_types):
     m = meta.copy()
     m["start_date"] = pd.to_datetime(m["start_date"], utc=True, format="ISO8601")
+    sel = {_norm_type(t) for t in activity_types}
     mask = (
         (m["start_date"].dt.date >= start_date)
         & (m["start_date"].dt.date <= end_date)
-        & (m["type"].isin(activity_types))
+        & (m["type"].map(_norm_type).isin(sel))
     )
-    ids = set(m.loc[mask, "activity_id"].astype("int64"))
+    return m.loc[mask]
+
+
+def select_range(streams, meta, start_date, end_date, activity_types):
+    m = filter_meta(meta, start_date, end_date, activity_types)
+    ids = set(m["activity_id"].astype("int64"))
     return streams[streams["activity_id"].astype("int64").isin(ids)].copy(), len(ids)
 
 
@@ -289,6 +308,27 @@ def simulate(df_gpx, profile, baseline_ft,
 
 
 # =====================================================================
+# HISTORICAL STOP ANALYSIS (per-activity stopped time from cached streams)
+# =====================================================================
+def historical_stops(streams, stopped_speed_mps=None):
+    """Per-activity distance + stopped time from cached streams.
+    Counts both recorded-idle samples and pause gaps (big dt, no distance)."""
+    thresh = stopped_speed_mps or DEFAULTS["stopped_speed_mps"]
+    rows = []
+    for aid, g in streams.groupby("activity_id"):
+        g = g.sort_values("time_sec")
+        dt = g["time_sec"].diff()
+        dd = g["distance_meters"].diff()
+        valid = dt > 0
+        speed = dd[valid] / dt[valid]
+        stopped = float(dt[valid][speed < thresh].sum())
+        rows.append(dict(activity_id=aid,
+                         miles=float(g["distance_meters"].max()) * M_TO_MI,
+                         stopped_sec=stopped))
+    return pd.DataFrame(rows)
+
+
+# =====================================================================
 # CALIBRATION INSIGHTS (post-run residuals -> dial suggestions)
 # =====================================================================
 def calibration_insights(df, fatigue_rate, altitude_rate):
@@ -333,4 +373,59 @@ def calibration_insights(df, fatigue_rate, altitude_rate):
             )
         else:
             out.append(f"Fatigue model held up well (late vs early residual drift {drift:+.1f}%).")
+    return out
+
+
+# =====================================================================
+# RUN INSIGHTS (deterministic post-run analysis beyond dial calibration)
+# =====================================================================
+def run_insights(df):
+    """Narrative-style observations about execution. Telemetry required."""
+    if not df["has_telemetry"].iloc[0]:
+        return []
+    miles = []
+    for m, g in df.groupby("mile_bucket"):
+        mi = g["delta_dist_miles"].sum()
+        if mi < 0.5:
+            continue
+        moving = g["actual_delta"].sum() - g["stopped_sec"].sum()
+        pred = g["pred_sec_median"].sum()
+        miles.append(dict(
+            mile=int(m), var_pct=(moving - pred) / pred * 100,
+            stop=g["stopped_sec"].sum(),
+            is_desc=g["grade_band"].str.contains("Descent").mean() > 0.5,
+            is_climb=g["grade_band"].str.contains("Climb|Wall").mean() > 0.5,
+        ))
+    md = pd.DataFrame(miles)
+    out = []
+    if len(md) < 2:
+        return out
+
+    best = md.loc[md["var_pct"].idxmin()]
+    worst = md.loc[md["var_pct"].idxmax()]
+    out.append(f"Best-executed mile: {int(best['mile'])} ({best['var_pct']:+.0f}% vs target). "
+               f"Toughest: mile {int(worst['mile'])} ({worst['var_pct']:+.0f}%).")
+
+    half = len(md) // 2
+    fh = md.iloc[:half]["var_pct"].median()
+    sh = md.iloc[half:]["var_pct"].median()
+    style = "strengthened relative to plan late" if sh < fh else "faded relative to plan late"
+    out.append(f"Execution split: first half {fh:+.1f}% vs target, second half {sh:+.1f}% — {style}.")
+
+    climbs, descs = md[md["is_climb"]], md[md["is_desc"]]
+    if len(climbs) >= 2 and len(descs) >= 2:
+        out.append(f"Terrain execution: climbing miles ran {climbs['var_pct'].median():+.1f}% vs "
+                   f"target, descent miles {descs['var_pct'].median():+.1f}%.")
+
+    tot_stop = df["stopped_sec"].sum()
+    if tot_stop > 60:
+        big = md.loc[md["stop"].idxmax()]
+        out.append(f"Stopped {f_time(tot_stop)} total; the largest chunk came in "
+                   f"mile {int(big['mile'])} ({f_time(big['stop'])}).")
+
+    moving_total = df["actual_delta"].sum() - tot_stop
+    gaps = {g: abs(moving_total - df[f"pred_sec_{g}"].sum()) for g in GEARS}
+    verdict = min(gaps, key=gaps.get)
+    out.append(f"Overall, this run tracked closest to your {verdict.upper()} gear "
+               f"({f_signed(moving_total - df[f'pred_sec_{verdict}'].sum())} vs its projection).")
     return out
