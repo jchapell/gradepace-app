@@ -188,7 +188,9 @@ meta = st.session_state["meta"]
 # =========================================================================
 # SIDEBAR
 # =========================================================================
+APP_BUILD = "2026-07-10-a (diagnostics)"
 st.sidebar.markdown(f"**Athlete:** {st.session_state['athlete_name']}")
+st.sidebar.caption(f"Build: {APP_BUILD}")
 st.sidebar.caption(f"Cache: {meta.shape[0]} activities / {len(streams):,} points")
 
 st.sidebar.header("1 · Data window")
