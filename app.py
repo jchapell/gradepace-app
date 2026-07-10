@@ -189,7 +189,7 @@ meta = st.session_state["meta"]
 # =========================================================================
 # SIDEBAR
 # =========================================================================
-APP_BUILD = "2026-07-10-d (adjusted-target labels)"
+APP_BUILD = "2026-07-10-e (band HR column)"
 st.sidebar.markdown(f"**Athlete:** {st.session_state['athlete_name']}")
 st.sidebar.caption(f"Build: {APP_BUILD}")
 st.sidebar.caption(f"Cache: {meta.shape[0]} activities / {len(streams):,} points")
@@ -396,17 +396,20 @@ st.markdown("**⏱️ Time by grade band (adjusted)**")
 band_rows = []
 for band, g in df.groupby("grade_band"):
     mi = g["delta_dist_miles"].sum()
+    hr_vals = g["hr"].dropna()
     band_rows.append({
         "Grade band": band,
         "Fast": gp.f_time(g["pred_sec_fast"].sum()),
         "Median": gp.f_time(g["pred_sec_median"].sum()),
         "Slow": gp.f_time(g["pred_sec_slow"].sum()),
         "Actual*": gp.f_time(g["actual_delta"].sum()) if has_watch else "N/A",
+        "Avg HR": f"{hr_vals.mean():.0f}" if has_watch and len(hr_vals) > 10 else "N/A",
         "Share": f"{mi / total_mi * 100:.0f}% · {mi:.2f} mi",
     })
 st.dataframe(pd.DataFrame(band_rows), use_container_width=True, hide_index=True)
 if has_watch:
-    st.caption("*Actual includes stopped time within each band.")
+    st.caption("*Actual includes stopped time within each band. Avg HR is read from "
+               "your watch file when it contains heart-rate data.")
 
     st.markdown("**Pace by grade band** — the table above shows *total time* per band; "
                 "these bars show the same data as *pace per mile*. Targets are your profile "

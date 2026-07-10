@@ -228,6 +228,18 @@ def parse_gpx(path_or_file):
     root = tree.getroot()
     ns = {"gpx": "http://www.topografix.com/GPX/1/1"}
     pts = root.findall(".//gpx:trkpt", ns) or root.findall(".//trkpt")
+    def _find_hr(tp):
+        """HR lives in watch-specific extension blocks; match any descendant tag
+        named 'hr' regardless of namespace (Garmin/Coros/Suunto exports)."""
+        for el in tp.iter():
+            tag = el.tag.split("}")[-1].lower()
+            if tag == "hr" and el.text:
+                try:
+                    return float(el.text)
+                except ValueError:
+                    return np.nan
+        return np.nan
+
     recs = []
     for tp in pts:
         ele = tp.find("gpx:ele", ns)
@@ -243,6 +255,7 @@ def parse_gpx(path_or_file):
             lat=float(tp.get("lat")), lon=float(tp.get("lon")),
             ele=float(ele.text) if ele is not None else 0.0,
             timestamp=ts,
+            hr=_find_hr(tp),
         ))
     df = pd.DataFrame(recs)
     df.attrs["has_telemetry"] = df["timestamp"].notna().mean() > 0.9 if len(df) else False
@@ -257,6 +270,8 @@ def simulate(df_gpx, profile, baseline_ft,
              allow_altitude_benefit=False, **over):
     p = {**DEFAULTS, **over}
     df = df_gpx.copy()
+    if "hr" not in df.columns:
+        df["hr"] = np.nan
     df["delta_dist"] = haversine(df["lat"].shift(), df["lon"].shift(), df["lat"], df["lon"])
     df.loc[df.index[0], "delta_dist"] = 0.0
     df["delta_ele"] = df["ele"].diff().fillna(0.0)
